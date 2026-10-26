@@ -83,7 +83,8 @@ test.after(async () => {
 
 test('the editor page loads the frontend hook and the hook serves the script', async () => {
 	const page = await (await fetch(`${BASE}/signin`, { headers: { Accept: 'text/html' } })).text();
-	assert.match(page, /<script nonce="[^"]+" src="\/assets\/oidc-frontend-hook\.js"><\/script>/);
+	// Older supported n8n versions do not add a CSP nonce to external hooks.
+	assert.match(page, /<script(?: nonce="[^"]+")? src="\/assets\/oidc-frontend-hook\.js"><\/script>/);
 
 	const script = await fetch(`${BASE}/assets/oidc-frontend-hook.js`);
 	assert.equal(script.status, 200);

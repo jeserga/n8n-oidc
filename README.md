@@ -1,5 +1,7 @@
 # n8n-oidc
 
+This is the controlled fork [jeserga/n8n-oidc](https://github.com/jeserga/n8n-oidc), based on `kavdau/n8n-oidc` commit `bf432a1356cde1195b1048725a30b64d6bcf1b12`. Release `2.1.1-jeserga.1` adds focused security hardening and is tested with the official n8n 2.7.5 image. See [the review and deployment constraints](SECURITY_REVIEW.md). The installation instructions below are inherited from upstream; its GHCR images do not contain this fork’s changes. To deploy this fork, pin a reviewed release and mount its `hooks.js` read-only through `EXTERNAL_HOOK_FILES`; no sidecar or npm installation is required.
+
 OpenID Connect login for **n8n Community Edition**, as an external hook. Works with
 [Pocket ID](https://pocket-id.org), Authentik, Keycloak, Authelia and any other
 standards-compliant provider.

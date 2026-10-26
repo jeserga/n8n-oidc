@@ -3,6 +3,14 @@
 Each version is published as a GitHub release and as the Docker image
 `ghcr.io/kavdau/n8n-oidc:<version>`. The release notes are taken from this file.
 
+## 2.1.1-jeserga.1 - 2026-10-26
+
+- Use a browser-enforced host-only `__Host-` transaction cookie when secure cookies are enabled, including matching attributes when clearing it.
+- Sanitize control characters in logs and omit untrusted OAuth error descriptions and response bodies.
+- Reject HTTPS discovery documents that downgrade protocol endpoints to HTTP, and reject non-finite ID-token date claims.
+- Add security regression tests and restricted-account end-to-end tests; accommodate external-script markup on n8n 2.7.5.
+- Keep n8n’s native session issuance and account model; add no production dependencies.
+
 ## 2.1.1 - 2026-10-09
 
 - Fix: profile sync now saves the user the way n8n itself does, so n8n also renames

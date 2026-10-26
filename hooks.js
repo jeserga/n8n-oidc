@@ -23,7 +23,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { createRequire } = require('node:module');
 
-const HOOK_VERSION = '2.1.1';
+const HOOK_VERSION = '2.1.1-jeserga.1';
 const LOG_PREFIX = '[OIDC Hook]';
 const PROVIDER_TYPE = 'oidc';
 
@@ -54,12 +54,18 @@ const ERROR_CODES = new Set([
 	'user_disabled',
 ]);
 
+// Provider responses and callback parameters are untrusted log input too.
+function logValue(value) {
+	if (value instanceof Error) value = value.message;
+	return typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 2048) : value;
+}
+
 const log = {
-	info: (...args) => console.log(LOG_PREFIX, ...args),
-	warn: (...args) => console.warn(LOG_PREFIX, ...args),
-	error: (...args) => console.error(LOG_PREFIX, ...args),
+	info: (...args) => console.log(LOG_PREFIX, ...args.map(logValue)),
+	warn: (...args) => console.warn(LOG_PREFIX, ...args.map(logValue)),
+	error: (...args) => console.error(LOG_PREFIX, ...args.map(logValue)),
 	debug: (...args) => {
-		if (process.env.OIDC_DEBUG === 'true') console.log(LOG_PREFIX, '[debug]', ...args);
+		if (process.env.OIDC_DEBUG === 'true') console.log(LOG_PREFIX, '[debug]', ...args.map(logValue));
 	},
 };
 
@@ -219,6 +225,11 @@ function sanitizeRedirectPath(value) {
 	}
 }
 
+function transactionCookieSettings(secure) {
+	// A sibling subdomain cannot set a __Host- cookie for this application.
+	return secure ? { name: '__Host-n8n-oidc-tx', path: '/' } : { name: TX_COOKIE, path: TX_COOKIE_PATH };
+}
+
 function truncate(value, max = NAME_MAX_LENGTH) {
 	if (typeof value !== 'string') return undefined;
 	const trimmed = value.trim();
@@ -303,11 +314,12 @@ async function fetchJson(url, options = {}) {
 		body = text ? JSON.parse(text) : {};
 	} catch {
 		throw new Error(
-			`Expected JSON from ${url} but got HTTP ${response.status} ${response.headers.get('content-type') || ''}: ${text.slice(0, 200)}`,
+			`Expected JSON from ${url} but got HTTP ${response.status}`,
 		);
 	}
 	if (!response.ok) {
-		const detail = body && (body.error_description || body.error) ? `${body.error}: ${body.error_description || ''}` : text.slice(0, 200);
+		// Error descriptions can reflect credentials or authorization codes.
+		const detail = typeof body.error === 'string' && /^[a-zA-Z0-9_]{1,80}$/.test(body.error) ? body.error : 'provider_error';
 		throw new Error(`HTTP ${response.status} from ${url}: ${detail}`);
 	}
 	return body;
@@ -388,6 +400,16 @@ class OidcProvider {
 		}
 		for (const field of ['authorization_endpoint', 'token_endpoint', 'jwks_uri']) {
 			if (typeof discovery[field] !== 'string') throw new Error(`Discovery document lacks ${field}`);
+		}
+		for (const field of ['authorization_endpoint', 'token_endpoint', 'jwks_uri', 'userinfo_endpoint']) {
+			if (discovery[field] === undefined) continue;
+			const endpoint = new URL(discovery[field]);
+			if (!['https:', 'http:'].includes(endpoint.protocol) || endpoint.username || endpoint.password || endpoint.hash) {
+				throw new Error(`Discovery ${field} is not a usable HTTP(S) endpoint`);
+			}
+			if (new URL(this.config.issuerUrl).protocol === 'https:' && endpoint.protocol !== 'https:') {
+				throw new Error(`Discovery ${field} would downgrade HTTPS`);
+			}
 		}
 		if (
 			this.config.usePkce &&
@@ -494,13 +516,13 @@ class OidcProvider {
 			throw new Error('ID token azp does not match');
 		}
 		const nowSeconds = Math.floor(now / 1000);
-		if (typeof claims.exp !== 'number' || claims.exp + CLOCK_SKEW_SECONDS < nowSeconds) {
+		if (!Number.isFinite(claims.exp) || claims.exp + CLOCK_SKEW_SECONDS < nowSeconds) {
 			throw new Error('ID token has expired');
 		}
-		if (typeof claims.iat !== 'number' || claims.iat - CLOCK_SKEW_SECONDS > nowSeconds) {
+		if (!Number.isFinite(claims.iat) || claims.iat - CLOCK_SKEW_SECONDS > nowSeconds) {
 			throw new Error('ID token was issued in the future');
 		}
-		if (typeof claims.nbf === 'number' && claims.nbf - CLOCK_SKEW_SECONDS > nowSeconds) {
+		if (claims.nbf !== undefined && (!Number.isFinite(claims.nbf) || claims.nbf - CLOCK_SKEW_SECONDS > nowSeconds)) {
 			throw new Error('ID token is not valid yet');
 		}
 		if (!safeEqual(claims.nonce, expectedNonce)) throw new Error('ID token nonce does not match');
@@ -832,16 +854,18 @@ async function syncProfile(user, profile, config, n8n) {
 // ---------------------------------------------------------------------------
 
 function registerRoutes(app, { config, provider, n8n, cookieKey, redirectUri, baseUrl }) {
+	const { name: txCookieName, path: txCookiePath } = transactionCookieSettings(n8n.cookieSecure);
 	const txCookieOptions = {
 		httpOnly: true,
 		secure: n8n.cookieSecure,
 		// Must be lax: the provider redirects back with a cross-site top-level GET.
 		sameSite: 'lax',
-		path: TX_COOKIE_PATH,
+		path: txCookiePath,
 		maxAge: TX_MAX_AGE_SECONDS * 1000,
 	};
+	const clearTransaction = (res) => res.clearCookie(txCookieName, { path: txCookiePath, secure: n8n.cookieSecure, httpOnly: true, sameSite: 'lax' });
 	const fail = (res, code) => {
-		res.clearCookie(TX_COOKIE, { path: TX_COOKIE_PATH });
+		clearTransaction(res);
 		res.redirect(`${baseUrl}/signin?oidc_error=${encodeURIComponent(code)}`);
 	};
 
@@ -853,7 +877,7 @@ function registerRoutes(app, { config, provider, n8n, cookieKey, redirectUri, ba
 			const redirect = sanitizeRedirectPath(typeof req.query.redirect === 'string' ? req.query.redirect : '/');
 			const authorizationUrl = await provider.buildAuthorizationUrl({ state, nonce, codeVerifier, redirectUri });
 
-			res.cookie(TX_COOKIE, sealTransaction({ state, nonce, codeVerifier, redirect }, cookieKey), txCookieOptions);
+			res.cookie(txCookieName, sealTransaction({ state, nonce, codeVerifier, redirect }, cookieKey), txCookieOptions);
 			res.set('Cache-Control', 'no-store');
 			res.redirect(authorizationUrl);
 		} catch (error) {
@@ -864,8 +888,8 @@ function registerRoutes(app, { config, provider, n8n, cookieKey, redirectUri, ba
 
 	app.get(ROUTE_CALLBACK, async (req, res) => {
 		res.set('Cache-Control', 'no-store');
-		const tx = openTransaction(req.cookies && req.cookies[TX_COOKIE], cookieKey);
-		res.clearCookie(TX_COOKIE, { path: TX_COOKIE_PATH });
+		const tx = openTransaction(req.cookies && req.cookies[txCookieName], cookieKey);
+		clearTransaction(res);
 		try {
 			if (typeof req.query.error === 'string') {
 				const code = req.query.error === 'access_denied' ? 'access_denied' : 'login_failed';
@@ -1272,6 +1296,9 @@ module.exports = {
 Object.defineProperty(module.exports, Symbol.for('n8n-oidc.internals'), {
 	value: {
 		loadConfig,
+		transactionCookieSettings,
+		logValue,
+		fetchJson,
 		sanitizeRedirectPath,
 		sealTransaction,
 		openTransaction,

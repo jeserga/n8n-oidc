@@ -3,12 +3,9 @@ name: test
 on:
   # Branches are tested through their pull request; main once more after merging.
   push:
-    branches: [main]
+    branches: [main, 'audit/**']
   pull_request:
   workflow_dispatch:
-  # Weekly, so a new n8n release that breaks the hook shows up before you upgrade.
-  schedule:
-    - cron: '17 5 * * 1'
 
 jobs:
   unit:
@@ -18,7 +15,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-      - run: node --test test/unit.test.js
+      - run: npm test
 
   n8n:
     name: n8n ${{ matrix.n8n }}
@@ -46,7 +43,7 @@ jobs:
           echo "Testing against n8n $(node -p "require('./node_modules/n8n/package.json').version")" >> "$GITHUB_STEP_SUMMARY"
 
       - name: End-to-end
-        run: node --test --test-reporter=spec --test-timeout=400000 test/e2e.test.js
+        run: npm run test:e2e
 
       - name: Browser
         run: |
